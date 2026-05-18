@@ -1,28 +1,326 @@
 import React, { useState, useEffect, useCallback } from 'react';
-import { Link, useLocation } from 'react-router-dom';
+import { Link, useLocation, useNavigate } from 'react-router-dom';
 import { useAuth } from '../context/AuthContext';
+import Questions from './Questions';
+import TitleButton from '../components/title.jsx';
+import DashboardButton from '../components/dashboard.jsx';
+import GradeButton, { GradePanel, GRADE_OPTIONS } from '../components/Grade.jsx';
+import RateButton from '../components/Rate.jsx';
+import AverageButton, { AveragePanel } from '../components/Average.jsx';
 
-const API = (path, token, opts = {}) =>
-  fetch(path, { ...opts, headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', ...opts.headers } });
+const gradeDivisorsForTier = (tier) => {
+  if (tier === 'members') return [50, 150];
+  if (tier === 'pro') return [75];
+  return [5];
+};
 
-function StarRating({ value, onChange, readonly }) {
-  const [hover, setHover] = useState(0);
+const hasSavedAnswerData = (item) => (
+  Boolean(item?.answerText?.trim()) ||
+  item?.grade != null ||
+  item?.rating != null ||
+  item?.isSaved
+);
+
+function RatePanel({
+  answers,
+  onPrintAnswers,
+  onRateChange,
+  rateFeedback,
+  selectedTitle,
+  activeTier
+}) {
+  const tierNumberLimit = activeTier === 'pro' ? 75 : activeTier === 'members' ? 50 : 5;
+
+  const ratingFromRank = (rank, total) => {
+    if (!total || total <= 1) return 5;
+    const value = Math.round(5 - (4 * (rank - 1)) / (total - 1));
+    return Math.max(1, Math.min(5, value));
+  };
+
+  const getAnswerKey = (item, index = 0) => {
+    const questionData = item?.questionId && typeof item.questionId === 'object' ? item.questionId : null;
+    return item?._id || questionData?._id || item?.questionId || `answer-${index}`;
+  };
+
+  const sortAnswersByRating = useCallback((items) => {
+    return [...items].sort((left, right) => {
+      const leftRating = Number(left?.rating);
+      const rightRating = Number(right?.rating);
+      const leftHasRating = Number.isFinite(leftRating);
+      const rightHasRating = Number.isFinite(rightRating);
+
+      if (leftHasRating && rightHasRating && leftRating !== rightRating) {
+        return rightRating - leftRating;
+      }
+
+      if (leftHasRating !== rightHasRating) {
+        return leftHasRating ? -1 : 1;
+      }
+
+      const leftQuestionNumber = Number(left?.questionId?.questionNumber) || 0;
+      const rightQuestionNumber = Number(right?.questionId?.questionNumber) || 0;
+      if (leftQuestionNumber && rightQuestionNumber && leftQuestionNumber !== rightQuestionNumber) {
+        return leftQuestionNumber - rightQuestionNumber;
+      }
+
+      return new Date(left?.savedAt || 0).getTime() - new Date(right?.savedAt || 0).getTime();
+    });
+  }, []);
+
+  const [orderedAnswers, setOrderedAnswers] = useState(() => sortAnswersByRating(answers));
+  const [answerNumbers, setAnswerNumbers] = useState({});
+  const [selectedAnswerKey, setSelectedAnswerKey] = useState('');
+
+  const getAssignedNumber = useCallback((item, index = 0, numbers = answerNumbers) => {
+    const key = getAnswerKey(item, index);
+    return Number(numbers[key]) || index + 1;
+  }, [answerNumbers]);
+
+  useEffect(() => {
+    const sortedAnswers = sortAnswersByRating(answers);
+
+    setAnswerNumbers((prev) => {
+      const nextNumbers = {};
+      const usedNumbers = new Set();
+
+      sortedAnswers.forEach((item, index) => {
+        const key = getAnswerKey(item, index);
+        const requestedNumber = Number(prev[key]);
+        const nextNumber = Number.isInteger(requestedNumber) && requestedNumber >= 1 && requestedNumber <= tierNumberLimit && !usedNumbers.has(requestedNumber)
+          ? requestedNumber
+          : null;
+
+        if (nextNumber != null) {
+          nextNumbers[key] = nextNumber;
+          usedNumbers.add(nextNumber);
+          return;
+        }
+
+        for (let number = 1; number <= tierNumberLimit; number += 1) {
+          if (!usedNumbers.has(number)) {
+            nextNumbers[key] = number;
+            usedNumbers.add(number);
+            break;
+          }
+        }
+      });
+
+      return nextNumbers;
+    });
+
+    setOrderedAnswers(sortedAnswers);
+  }, [answers, sortAnswersByRating, tierNumberLimit]);
+
+  const displayedAnswers = [...orderedAnswers].sort((left, right) => {
+    const leftNumber = getAssignedNumber(left);
+    const rightNumber = getAssignedNumber(right);
+    if (leftNumber !== rightNumber) {
+      return leftNumber - rightNumber;
+    }
+
+    return sortAnswersByRating([left, right])[0] === left ? -1 : 1;
+  });
+
+  useEffect(() => {
+    if (!displayedAnswers.length) {
+      setSelectedAnswerKey('');
+      return;
+    }
+
+    const hasSelectedAnswer = displayedAnswers.some((item, index) => getAnswerKey(item, index) === selectedAnswerKey);
+    if (!hasSelectedAnswer) {
+      setSelectedAnswerKey(getAnswerKey(displayedAnswers[0], 0));
+    }
+  }, [displayedAnswers, selectedAnswerKey]);
+
+  const selectedIndex = displayedAnswers.findIndex((item, index) => getAnswerKey(item, index) === selectedAnswerKey);
+  const selectedNumber = selectedIndex >= 0 ? getAssignedNumber(displayedAnswers[selectedIndex], selectedIndex) : '';
+
+  const moveSelectedAnswer = (nextPosition) => {
+    const parsedPosition = Number(nextPosition);
+    if (!Number.isInteger(parsedPosition) || parsedPosition < 1 || parsedPosition > tierNumberLimit || selectedIndex < 0) {
+      return;
+    }
+
+    if (parsedPosition === selectedNumber) {
+      return;
+    }
+
+    const selectedItem = displayedAnswers[selectedIndex];
+    const selectedKey = getAnswerKey(selectedItem, selectedIndex);
+    const swapEntry = displayedAnswers.find((item, index) => {
+      const key = getAnswerKey(item, index);
+      return key !== selectedKey && Number(answerNumbers[key]) === parsedPosition;
+    }) || null;
+
+    setAnswerNumbers((prev) => {
+      const nextNumbers = { ...prev };
+      if (swapEntry) {
+        const swapKey = getAnswerKey(swapEntry);
+        nextNumbers[swapKey] = selectedNumber;
+      }
+      nextNumbers[selectedKey] = parsedPosition;
+      return nextNumbers;
+    });
+
+    if (typeof onRateChange === 'function') {
+      const total = displayedAnswers.length;
+      onRateChange(selectedItem, ratingFromRank(parsedPosition, total));
+      if (swapEntry) {
+        onRateChange(swapEntry, ratingFromRank(selectedNumber, total));
+      }
+    }
+  };
+
+  const resetToBestFirst = () => {
+    const sortedAnswers = sortAnswersByRating(answers);
+    setOrderedAnswers(sortedAnswers);
+    setAnswerNumbers(
+      sortedAnswers.reduce((acc, item, index) => {
+        acc[getAnswerKey(item, index)] = index + 1;
+        return acc;
+      }, {})
+    );
+
+    if (typeof onRateChange === 'function') {
+      const total = sortedAnswers.length;
+      sortedAnswers.forEach((item, index) => {
+        onRateChange(item, ratingFromRank(index + 1, total));
+      });
+    }
+  };
+
   return (
-    <div className="star-rating">
-      {[1, 2, 3, 4, 5].map(s => (
-        <span
-          key={s}
-          className={`star ${(hover || value) >= s ? 'filled' : ''}`}
-          onClick={() => !readonly && onChange && onChange(s)}
-          onMouseEnter={() => !readonly && setHover(s)}
-          onMouseLeave={() => !readonly && setHover(0)}
-          role={readonly ? undefined : 'button'}
-          title={`${s} star${s !== 1 ? 's' : ''}`}
-        >★</span>
-      ))}
-    </div>
+    <section className="question-card" id="rate-panel">
+      <div className="question-meta">
+        <span className="question-number">Rate</span>
+        <h2 className="question-title">Answer List</h2>
+      </div>
+
+      <div className="grade-input-row" style={{ marginBottom: '1rem', justifyContent: 'space-between' }}>
+        <strong>Total answers: {answers.length}</strong>
+        <div className="grade-input-row">
+          <button type="button" className="btn btn-secondary" onClick={resetToBestFirst} disabled={answers.length === 0}>
+            Best First
+          </button>
+          <button type="button" className="btn btn-secondary" onClick={onPrintAnswers} disabled={answers.length === 0}>
+            Print Answers
+          </button>
+        </div>
+      </div>
+
+      {rateFeedback && <div className="answer-help" style={{ marginBottom: '1rem' }}>{rateFeedback}</div>}
+
+      {answers.length === 0 ? (
+        <div className="answer-help">Save an answer first. Your saved answers will show up here as a numbered list.</div>
+      ) : (
+        <div style={{ display: 'grid', gap: '1rem' }}>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))',
+              gap: '0.75rem'
+            }}
+          >
+            <div className="question-page-summary">
+              <div>
+                <div style={{ fontWeight: 700, color: 'var(--color-dark)' }}>Best answer first</div>
+                <div style={{ color: 'var(--color-text-light)', fontSize: '0.9rem' }}>
+                  Number choices follow your tier range: 1-{tierNumberLimit}.
+                </div>
+              </div>
+            </div>
+            <div className="question-page-summary">
+              <div>
+                <div style={{ fontWeight: 700, color: 'var(--color-dark)' }}>
+                  {selectedIndex >= 0 ? `Selected: #${selectedNumber}` : 'No answer selected'}
+                </div>
+              </div>
+            </div>
+          </div>
+          <div className="grade-input-row" style={{ justifyContent: 'space-between' }}>
+            <div className="answer-help" style={{ marginBottom: 0 }}>
+              {selectedIndex >= 0
+                ? `Selected answer: ${selectedNumber}`
+                : 'Click an answer to choose it.'}
+            </div>
+            <label htmlFor="rate-answer-position" style={{ display: 'inline-flex', alignItems: 'center', gap: '0.5rem', fontSize: '16px' }}>
+              <strong style={{ fontSize: '16px' }}>Move to number</strong>
+              <select
+                id="rate-answer-position"
+                className="input"
+                value={selectedIndex >= 0 ? String(selectedNumber) : ''}
+                onChange={(event) => moveSelectedAnswer(event.target.value)}
+                disabled={selectedIndex < 0}
+                style={{ fontSize: '16px' }}
+              >
+                {Array.from({ length: tierNumberLimit }, (_, index) => index + 1).map((value) => (
+                  <option key={value} value={value}>
+                    {value}
+                  </option>
+                ))}
+              </select>
+            </label>
+          </div>
+          <div style={{ overflowX: 'auto' }}>
+          <table className="table" style={{ width: '100%' }}>
+            <thead>
+              <tr>
+                <th>Rank</th>
+                <th>Answer</th>
+              </tr>
+            </thead>
+            <tbody>
+              {displayedAnswers.map((item, index) => {
+                const questionData = item.questionId && typeof item.questionId === 'object' ? item.questionId : null;
+                const rowKey = getAnswerKey(item, index);
+                const isSelected = rowKey === selectedAnswerKey;
+                const assignedNumber = getAssignedNumber(item, index);
+                const rankLabel = index === 0 ? 'Best' : index === 1 ? 'Second' : index === 2 ? 'Third' : `#${assignedNumber}`;
+
+                return (
+                  <tr
+                    key={item._id || `${rowKey}-${index}`}
+                    onClick={() => setSelectedAnswerKey(rowKey)}
+                    style={{ background: isSelected ? 'rgba(168, 216, 234, 0.22)' : undefined, cursor: 'pointer' }}
+                  >
+                    <td style={{ minWidth: '120px', verticalAlign: 'top' }}>
+                      <div style={{ whiteSpace: 'nowrap', fontWeight: 700, marginBottom: '0.35rem' }}>
+                        {assignedNumber}
+                      </div>
+                      <div style={{ color: 'var(--color-dark)', fontSize: '0.82rem', fontWeight: 700, marginBottom: '0.35rem' }}>
+                        {rankLabel}
+                      </div>
+                      <div style={{ color: 'var(--color-text-light)', fontSize: '0.85rem' }}>
+                        {questionData?.businessTitle || item.businessTitle || 'Business Title'}
+                      </div>
+                    </td>
+                    <td style={{ minWidth: '280px', color: 'var(--color-dark)', whiteSpace: 'pre-wrap' }}>
+                      <div style={{ fontWeight: 800 }}>
+                        {item.answerText?.trim() || 'No saved answer text yet.'}
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        </div>
+      )}
+    </section>
   );
 }
+
+const API = (path, token, opts = {}) =>
+  fetch(path, {
+    ...opts,
+    headers: {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+      ...opts.headers
+    }
+  });
 
 function TierBanner({ tier, tierExpiry, isAdmin }) {
   const tierLabel = tier === 'pro' ? 'Pro' : tier === 'members' ? 'Members' : 'Free';
@@ -38,16 +336,18 @@ function TierBanner({ tier, tierExpiry, isAdmin }) {
         <strong>Plan: {tierLabel}</strong>
         {tier === 'free' && daysLeft !== null && !isExpired && (
           <span style={{ marginLeft: '0.75rem', color: daysLeft <= 1 ? 'var(--color-danger)' : 'inherit' }}>
+            {' '}
             · {daysLeft} day{daysLeft !== 1 ? 's' : ''} remaining in free trial
           </span>
         )}
         {isExpired && (
           <span style={{ marginLeft: '0.75rem', color: 'var(--color-danger)', fontWeight: 700 }}>
+            {' '}
             · Free trial expired
           </span>
         )}
       </div>
-      {(tier === 'free') && (
+      {tier === 'free' && (
         <Link to="/price" className="btn btn-primary btn-sm">Upgrade Plan</Link>
       )}
     </div>
@@ -58,174 +358,566 @@ export default function Dashboard() {
   const { user, tier, tierExpiry, isAdmin } = useAuth();
   const token = localStorage.getItem('token');
   const location = useLocation();
+  const navigate = useNavigate();
+  const searchParams = new URLSearchParams(location.search);
+  const focus = searchParams.get('focus') || '';
+  const activeTitle = searchParams.get('title') || '';
+  const clientTitle = searchParams.get('clientTitle') || '';
+  const requestedQuestionNumber = Number.parseInt(searchParams.get('question') || '', 10);
+  const selectedTitle = clientTitle || activeTitle;
 
-  const [tab, setTab] = useState('questions');
-  const [titles, setTitles] = useState([]);
-  const [selectedTitle, setSelectedTitle] = useState('');
   const [question, setQuestion] = useState(null);
+  const [questions, setQuestions] = useState([]);
+  const [selectedQuestionId, setSelectedQuestionId] = useState(null);
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [totalQ, setTotalQ] = useState(0);
   const [loadingQ, setLoadingQ] = useState(false);
-  const [answers, setAnswers] = useState([]);
-  const [stats, setStats] = useState({ averageGrade: 0, averageRating: 0, totalAnswers: 0 });
-  const [answerText, setAnswerText] = useState('');
-  const [grade, setGrade] = useState('');
-  const [rating, setRating] = useState(0);
-  const [saving, setSaving] = useState(false);
+  const [account, setAccount] = useState(null);
   const [feedback, setFeedback] = useState('');
   const [successMsg, setSuccessMsg] = useState('');
+  const [gradeFeedback, setGradeFeedback] = useState('');
+  const [rateFeedback, setRateFeedback] = useState('');
+  const [answersByQuestionId, setAnswersByQuestionId] = useState({});
+  const [answerText, setAnswerText] = useState('');
+  const [savingAnswer, setSavingAnswer] = useState(false);
+  const [savingGradeId, setSavingGradeId] = useState(null);
+  const [savingRateId, setSavingRateId] = useState(null);
+  const [saveTrace, setSaveTrace] = useState(null);
+  const QUESTIONS_PER_PAGE = 1;
 
   useEffect(() => {
     const params = new URLSearchParams(location.search);
     if (params.get('payment') === 'success') {
-      setSuccessMsg('🎉 Payment successful! Your plan has been upgraded.');
+      setSuccessMsg('Payment successful! Your plan has been upgraded.');
     }
-    fetchTitles();
-    fetchStats();
-    fetchAnswers();
-  }, []);
+  }, [location.search]);
 
-  const fetchTitles = async () => {
-    try {
-      const res = await fetch('/api/questions/titles');
-      if (res.ok) setTitles(await res.json());
-    } catch {}
-  };
+  useEffect(() => {
+    if (selectedTitle) {
+      document.title = `${selectedTitle} | KNO U KNO`;
+      return;
+    }
 
-  const fetchStats = async () => {
-    try {
-      const res = await API('/api/answers/average', token);
-      if (res.ok) setStats(await res.json());
-    } catch {}
-  };
+    document.title = 'Dashboard | KNO U KNO';
+  }, [selectedTitle]);
 
-  const fetchAnswers = async () => {
+  useEffect(() => {
+    const fetchAccount = async () => {
+      try {
+        const res = await API('/api/auth/me', token);
+        if (res.ok) {
+          setAccount(await res.json());
+        }
+      } catch {}
+    };
+
+    if (token) {
+      fetchAccount();
+    }
+  }, [token]);
+
+  const fetchSavedAnswers = useCallback(async () => {
     try {
       const res = await API('/api/answers/my', token);
-      if (res.ok) setAnswers(await res.json());
-    } catch {}
-  };
+      if (!res.ok) {
+        return;
+      }
 
-  const fetchQuestion = useCallback(async (p = 1, title = selectedTitle) => {
+      const data = await res.json();
+      const nextAnswers = (Array.isArray(data) ? data : []).reduce((acc, item) => {
+        const questionId = item?.questionId?._id || item?.questionId;
+        if (questionId) {
+          acc[questionId] = item;
+        }
+        return acc;
+      }, {});
+
+      setAnswersByQuestionId(nextAnswers);
+    } catch {}
+  }, [token]);
+
+  useEffect(() => {
+    if (token) {
+      fetchSavedAnswers();
+    }
+  }, [fetchSavedAnswers, token]);
+
+  useEffect(() => {
+    const searchParams = new URLSearchParams(location.search);
+    const hasExplicitDashboardTarget = Boolean(
+      searchParams.get('tab') ||
+      searchParams.get('focus') ||
+      searchParams.get('title') ||
+      searchParams.get('clientTitle')
+    );
+
+    if ((isAdmin || tier === 'members' || tier === 'pro') && !hasExplicitDashboardTarget) {
+      navigate('/list', { replace: true });
+    }
+  }, [tier, isAdmin, location.search, navigate]);
+
+  const fetchQuestion = useCallback(async (nextPage = 1) => {
     setLoadingQ(true);
     setFeedback('');
+
     try {
-      const params = new URLSearchParams({ page: p, limit: 1 });
-      if (title) params.set('businessTitle', title);
-      const res = await API(`/api/questions?${params}`, token);
-      if (res.ok) {
-        const data = await res.json();
-        if (data.questions && data.questions.length > 0) {
-          const q = data.questions[0];
-          setQuestion(q);
-          setTotalPages(data.pages);
-          setTotalQ(data.total);
-          setPage(p);
-          // Pre-fill saved answer if exists
-          const saved = answers.find(a => a.questionId && a.questionId._id === q._id);
-          setAnswerText(saved?.answerText || '');
-          setGrade(saved?.grade != null ? String(saved.grade) : '');
-          setRating(saved?.rating || 0);
-        } else {
-          setQuestion(null);
-          setTotalPages(data.pages || 1);
-          setTotalQ(data.total || 0);
-        }
-      } else {
-        const d = await res.json();
-        setFeedback(d.message || 'Could not load question.');
+      const params = new URLSearchParams({ page: String(nextPage), limit: String(QUESTIONS_PER_PAGE) });
+      if (selectedTitle) {
+        params.set('businessTitle', selectedTitle);
       }
+
+      const res = await API(`/api/questions?${params.toString()}`, token);
+      if (!res.ok) {
+        const data = await res.json();
+        setFeedback(data.message || 'Could not load questions.');
+        return;
+      }
+
+      const data = await res.json();
+      const nextQuestions = data.questions || [];
+      const initialQuestion = nextQuestions[0] || null;
+
+      setQuestions(nextQuestions);
+      setQuestion(initialQuestion);
+      setSelectedQuestionId(initialQuestion?._id || null);
+      setTotalPages(data.pages || 1);
+      setTotalQ(data.total || 0);
+      setPage(nextPage);
     } catch {
-      setFeedback('Network error loading question.');
+      setFeedback('Network error loading questions.');
     } finally {
       setLoadingQ(false);
     }
-  }, [token, selectedTitle, answers]);
+  }, [token, selectedTitle]);
 
   useEffect(() => {
-    if (tab === 'questions') {
-      fetchQuestion(1, selectedTitle);
+    if (token) {
+      const initialPage = Number.isNaN(requestedQuestionNumber) || requestedQuestionNumber < 1 ? 1 : requestedQuestionNumber;
+      fetchQuestion(initialPage);
     }
-  }, [tab, selectedTitle]);
+  }, [fetchQuestion, requestedQuestionNumber, token]);
 
-  const saveAnswer = async () => {
-    if (!question) return;
-    setSaving(true);
+  useEffect(() => {
+    if (!selectedQuestionId) {
+      setAnswerText('');
+      return;
+    }
+
+    setAnswerText(answersByQuestionId[selectedQuestionId]?.answerText || '');
+  }, [answersByQuestionId, selectedQuestionId]);
+
+  const selectQuestion = async (nextQuestion) => {
+    if (!nextQuestion) return;
+
+    if (nextQuestion.questionNumber && nextQuestion.questionNumber !== page) {
+      cacheCurrentAnswerDraft();
+      const direction = nextQuestion.questionNumber > page ? 'next' : 'previous';
+      const didSave = await saveAnswer({ silent: true, source: direction });
+      if (!didSave) {
+        setFeedback('Answer kept on the page. Could not save to MongoDB before changing questions.');
+      }
+      fetchQuestion(nextQuestion.questionNumber);
+      return;
+    }
+
+    setSelectedQuestionId(nextQuestion._id);
+    setQuestion(nextQuestion);
+
+    const nextSearchParams = new URLSearchParams(location.search);
+    nextSearchParams.set('question', String(nextQuestion.questionNumber));
+    navigate(`${location.pathname}?${nextSearchParams.toString()}`, { replace: true });
+
+    const elem = document.getElementById('question-detail');
+    if (elem) {
+      elem.scrollIntoView({ behavior: 'smooth', block: 'start' });
+    }
+  };
+
+  const goToPage = async (nextPage) => {
+    if (!nextPage || nextPage === page) return;
+    cacheCurrentAnswerDraft();
+    const direction = nextPage > page ? 'next' : 'previous';
+    const didSave = await saveAnswer({ silent: true, source: direction });
+    if (!didSave) {
+      setFeedback('Answer kept on the page. Could not save to MongoDB before changing questions.');
+    }
+    const nextSearchParams = new URLSearchParams(location.search);
+    nextSearchParams.set('question', String(nextPage));
+    navigate(`${location.pathname}?${nextSearchParams.toString()}`, { replace: true });
+    fetchQuestion(nextPage);
+  };
+
+  const currentQuestionIndex = questions.findIndex((item) => item._id === selectedQuestionId);
+
+  const cacheCurrentAnswerDraft = useCallback(() => {
+    if (!selectedQuestionId) return;
+
+    setAnswersByQuestionId((prev) => ({
+      ...prev,
+      [selectedQuestionId]: {
+        ...(prev[selectedQuestionId] || {}),
+        questionId: prev[selectedQuestionId]?.questionId || question || selectedQuestionId,
+        businessTitle:
+          prev[selectedQuestionId]?.businessTitle ||
+          question?.businessTitle ||
+          '',
+        answerText,
+        isSaved: prev[selectedQuestionId]?.isSaved || Boolean(answerText?.trim())
+      }
+    }));
+  }, [answerText, question, selectedQuestionId]);
+
+  const saveAnswer = async ({ silent = false, source = 'save' } = {}) => {
+    if (!selectedQuestionId) {
+      if (!silent) {
+        setFeedback('Select a question first.');
+      }
+      setSaveTrace({
+        status: 'blocked',
+        source,
+        title: selectedTitle || question?.businessTitle || 'All titles',
+        questionNumber: question?.questionNumber || requestedQuestionNumber || page,
+        message: 'No question selected.',
+        time: new Date().toLocaleTimeString()
+      });
+      return false;
+    }
+
+    cacheCurrentAnswerDraft();
+    setSaveTrace({
+      status: 'saving',
+      source,
+      title: selectedTitle || question?.businessTitle || 'All titles',
+      questionNumber: question?.questionNumber || requestedQuestionNumber || page,
+      message: 'Saving answer to MongoDB...',
+      time: new Date().toLocaleTimeString()
+    });
+
+    setSavingAnswer(true);
+    if (!silent) {
+      setFeedback('');
+    }
+
     try {
       const res = await API('/api/answers/save', token, {
         method: 'POST',
-        body: JSON.stringify({ questionId: question._id, answerText })
+        body: JSON.stringify({ questionId: selectedQuestionId, answerText })
       });
-      if (res.ok) {
-        setFeedback('✅ Answer saved!');
-        fetchAnswers();
-        fetchStats();
-      } else {
-        const d = await res.json();
-        setFeedback(d.message || 'Could not save answer.');
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setSaveTrace({
+          status: 'failed',
+          source,
+          title: selectedTitle || question?.businessTitle || 'All titles',
+          questionNumber: question?.questionNumber || requestedQuestionNumber || page,
+          message: data.message || 'Could not save answer.',
+          time: new Date().toLocaleTimeString()
+        });
+        if (!silent) {
+          setFeedback(data.message || 'Could not save answer.');
+        }
+        return false;
       }
+
+      const savedAnswer = data.answer;
+      if (savedAnswer) {
+        setAnswersByQuestionId((prev) => ({
+          ...prev,
+          [selectedQuestionId]: {
+            ...(prev[selectedQuestionId] || {}),
+            ...savedAnswer,
+            questionId: prev[selectedQuestionId]?.questionId || question || savedAnswer.questionId
+          }
+        }));
+      }
+
+      await fetchSavedAnswers();
+
+      setSaveTrace({
+        status: 'saved',
+        source,
+        title: selectedTitle || question?.businessTitle || savedAnswer?.businessTitle || 'All titles',
+        questionNumber: question?.questionNumber || requestedQuestionNumber || page,
+        message: 'Answer saved to MongoDB.',
+        time: new Date().toLocaleTimeString()
+      });
+
+      if (!silent) {
+        setFeedback('✅ Answer saved');
+      }
+      return true;
     } catch {
-      setFeedback('Network error.');
+      setSaveTrace({
+        status: 'failed',
+        source,
+        title: selectedTitle || question?.businessTitle || 'All titles',
+        questionNumber: question?.questionNumber || requestedQuestionNumber || page,
+        message: 'Network error saving answer.',
+        time: new Date().toLocaleTimeString()
+      });
+      if (!silent) {
+        setFeedback('Network error saving answer.');
+      }
+      return false;
     } finally {
-      setSaving(false);
+      setSavingAnswer(false);
     }
   };
 
-  const saveGrade = async () => {
-    if (!question || grade === '') return;
-    const g = parseInt(grade);
-    if (isNaN(g) || g < 0 || g > 100) { setFeedback('Grade must be 0–100.'); return; }
-    setSaving(true);
-    try {
-      const res = await API('/api/answers/grade', token, {
-        method: 'POST',
-        body: JSON.stringify({ questionId: question._id, grade: g })
-      });
-      if (res.ok) {
-        setFeedback('✅ Grade saved!');
-        fetchAnswers();
-        fetchStats();
-      } else {
-        const d = await res.json();
-        setFeedback(d.message || 'Could not save grade.');
-      }
-    } catch {
-      setFeedback('Network error.');
-    } finally {
-      setSaving(false);
+  const goToAdjacentQuestion = async (direction) => {
+    const nextPage = page + direction;
+    const maxPage = Math.min(totalPages, maxQ);
+    if (nextPage < 1 || nextPage > maxPage) return;
+
+    cacheCurrentAnswerDraft();
+    const didSave = await saveAnswer({ silent: true, source: direction > 0 ? 'next' : 'previous' });
+    if (!didSave) {
+      setFeedback('Answer kept on the page. Could not save to MongoDB before changing questions.');
     }
-  };
 
-  const saveRating = async (r) => {
-    if (!question) return;
-    setRating(r);
-    try {
-      const res = await API('/api/answers/rate', token, {
-        method: 'POST',
-        body: JSON.stringify({ questionId: question._id, rating: r })
-      });
-      if (res.ok) {
-        setFeedback('✅ Rating saved!');
-        fetchAnswers();
-        fetchStats();
-      }
-    } catch {}
-  };
-
-  const deleteAnswer = async (id) => {
-    if (!window.confirm('Delete this saved answer?')) return;
-    try {
-      const res = await API(`/api/answers/${id}`, token, { method: 'DELETE' });
-      if (res.ok) {
-        fetchAnswers();
-        fetchStats();
-      }
-    } catch {}
+    const nextSearchParams = new URLSearchParams(location.search);
+    nextSearchParams.set('question', String(nextPage));
+    navigate(`${location.pathname}?${nextSearchParams.toString()}`, { replace: true });
+    fetchQuestion(nextPage);
   };
 
   const tierLimits = { free: 5, members: 50, pro: 75 };
-  const maxQ = isAdmin ? totalQ : (tierLimits[tier] || 5);
+  const maxBonusByTier = { members: 100, pro: 100 };
+  const activeTier = account?.tier || tier;
+  const bonusLimit = Math.max(
+    0,
+    Math.min(Number(account?.bonusQuestions) || 0, maxBonusByTier[activeTier] || 0)
+  );
+  const maxQ = isAdmin ? totalQ : ((tierLimits[activeTier] || 5) + bonusLimit);
+  const hasAdvancedTools = isAdmin || activeTier === 'members' || activeTier === 'pro';
+  const divisorOptions = gradeDivisorsForTier(activeTier);
+  const [selectedDivisor, setSelectedDivisor] = useState(divisorOptions[divisorOptions.length - 1]);
+
+  useEffect(() => {
+    const nextOptions = gradeDivisorsForTier(activeTier);
+    if (!nextOptions.includes(selectedDivisor)) {
+      setSelectedDivisor(nextOptions[nextOptions.length - 1]);
+    }
+  }, [activeTier, selectedDivisor]);
+
+  const displayedAnswers = Object.values(answersByQuestionId)
+    .filter((item) => {
+      if (!item) return false;
+      if (!selectedTitle) return hasSavedAnswerData(item);
+
+      const questionBusinessTitle = item.questionId && typeof item.questionId === 'object'
+        ? item.questionId.businessTitle
+        : '';
+
+      return (item.businessTitle === selectedTitle || questionBusinessTitle === selectedTitle) &&
+        hasSavedAnswerData(item);
+    })
+    .sort((left, right) => {
+      const leftQuestionNumber = left.questionId && typeof left.questionId === 'object'
+        ? Number(left.questionId.questionNumber) || 0
+        : 0;
+      const rightQuestionNumber = right.questionId && typeof right.questionId === 'object'
+        ? Number(right.questionId.questionNumber) || 0
+        : 0;
+
+      if (leftQuestionNumber && rightQuestionNumber) {
+        return leftQuestionNumber - rightQuestionNumber;
+      }
+
+      return new Date(left.savedAt || 0).getTime() - new Date(right.savedAt || 0).getTime();
+    });
+
+  const currentQuestionNumber = question?.questionNumber || requestedQuestionNumber || page;
+
+  const saveGrade = async (answer, letter) => {
+    const selectedOption = GRADE_OPTIONS.find((option) => option.letter === letter);
+    if (!selectedOption) return;
+
+    const questionId = answer?.questionId?._id || answer?.questionId;
+    if (!questionId) {
+      setGradeFeedback('Question not found for this answer.');
+      return;
+    }
+
+    setSavingGradeId(questionId);
+    setGradeFeedback('');
+
+    try {
+      const res = await API('/api/answers/grade', token, {
+        method: 'POST',
+        body: JSON.stringify({ questionId, grade: selectedOption.points })
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setGradeFeedback(data.message || 'Could not save grade.');
+        return;
+      }
+
+      const savedAnswer = data.answer;
+      if (savedAnswer) {
+        setAnswersByQuestionId((prev) => ({
+          ...prev,
+          [questionId]: {
+            ...(prev[questionId] || answer),
+            ...savedAnswer,
+            questionId: prev[questionId]?.questionId || answer.questionId
+          }
+        }));
+      }
+
+      setGradeFeedback(`Grade saved: ${selectedOption.letter} = ${selectedOption.points}`);
+    } catch {
+      setGradeFeedback('Network error saving grade.');
+    } finally {
+      setSavingGradeId(null);
+    }
+  };
+
+  const saveRate = async (answer, rating) => {
+    const questionId = answer?.questionId?._id || answer?.questionId;
+    if (!questionId) {
+      setRateFeedback('Question not found for this answer.');
+      return;
+    }
+
+    setSavingRateId(questionId);
+    setRateFeedback('');
+
+    try {
+      const res = await API('/api/answers/rate', token, {
+        method: 'POST',
+        body: JSON.stringify({ questionId, rating })
+      });
+
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        setRateFeedback(data.message || 'Could not save rating.');
+        return;
+      }
+
+      const savedAnswer = data.answer;
+      if (savedAnswer) {
+        setAnswersByQuestionId((prev) => ({
+          ...prev,
+          [questionId]: {
+            ...(prev[questionId] || answer),
+            ...savedAnswer,
+            questionId: prev[questionId]?.questionId || answer.questionId
+          }
+        }));
+      }
+
+      await fetchSavedAnswers();
+
+      setRateFeedback(`Rating saved to MongoDB: ${rating} / 5`);
+    } catch {
+      setRateFeedback('Network error saving rating.');
+    } finally {
+      setSavingRateId(null);
+    }
+  };
+
+  const printAnswers = () => {
+    if (displayedAnswers.length === 0) {
+      setRateFeedback('No saved answers to print.');
+      return;
+    }
+
+    const escapedTitle = (selectedTitle || 'All Saved Answers')
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;');
+
+    const answerMarkup = displayedAnswers.map((item, index) => {
+      const questionData = item.questionId && typeof item.questionId === 'object' ? item.questionId : null;
+      const questionNumberLabel = questionData?.questionNumber
+        ? `Question ${questionData.questionNumber}`
+        : `Answer ${index + 1}`;
+      const answerTextValue = (item.answerText?.trim() || 'No saved answer text yet.')
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;')
+        .replaceAll('\n', '<br />');
+      const ratingValue = item.rating != null ? `${item.rating} / 5` : 'Not rated';
+
+      return `
+        <li>
+          <h2>${questionNumberLabel}</h2>
+          <p class="answer-line">${answerTextValue}</p>
+          <p class="grade-line"><strong>Grade:</strong> ${ratingValue}</p>
+        </li>
+      `;
+    }).join('');
+
+    const htmlDocument = `<!DOCTYPE html>
+      <html lang="en">
+        <head>
+          <meta charset="utf-8" />
+          <title>${escapedTitle} - Print</title>
+          <style>
+            body { font-family: Arial, sans-serif; color: #222; margin: 32px; line-height: 1.5; }
+            h1 { font-size: 24px; margin-bottom: 8px; }
+            p { margin: 0 0 12px; }
+            ol { padding-left: 24px; }
+            li { margin-bottom: 28px; }
+            h2 { font-size: 18px; margin: 0 0 8px; }
+            .answer-line { margin: 0 0 8px; }
+            .grade-line { margin: 0; color: #444; }
+          </style>
+        </head>
+        <body>
+          <h1>${escapedTitle}</h1>
+          <p>Printed answer list with saved responses.</p>
+          <ol>${answerMarkup}</ol>
+        </body>
+      </html>`;
+
+    // Use a hidden iframe in the current page to render and print.
+    // This avoids ERR_FILE_NOT_FOUND issues that some browsers show when
+    // opening blob: URLs in a new tab/window.
+    const iframe = document.createElement('iframe');
+    iframe.setAttribute('aria-hidden', 'true');
+    iframe.style.position = 'fixed';
+    iframe.style.right = '0';
+    iframe.style.bottom = '0';
+    iframe.style.width = '0';
+    iframe.style.height = '0';
+    iframe.style.border = '0';
+    document.body.appendChild(iframe);
+
+    const cleanup = () => {
+      setTimeout(() => {
+        if (iframe.parentNode) {
+          iframe.parentNode.removeChild(iframe);
+        }
+      }, 1000);
+    };
+
+    iframe.onload = () => {
+      try {
+        const win = iframe.contentWindow;
+        win.focus();
+        win.print();
+      } catch (err) {
+        setRateFeedback('Could not open the print dialog.');
+      } finally {
+        cleanup();
+      }
+    };
+
+    const doc = iframe.contentDocument || iframe.contentWindow?.document;
+    if (!doc) {
+      cleanup();
+      setRateFeedback('Could not prepare the print view.');
+      return;
+    }
+    doc.open();
+    doc.write(htmlDocument);
+    doc.close();
+  };
 
   return (
     <div className="dashboard">
@@ -234,237 +926,123 @@ export default function Dashboard() {
       )}
 
       <div className="dashboard-header">
-        <h1>Welcome, {user?.name || 'Business Owner'}</h1>
-        <p>Track your business knowledge, grade your answers, and grow your expertise.</p>
+        <h1>{selectedTitle || `Welcome, ${user?.name || 'Business Owner'}`}</h1>
       </div>
 
-      <TierBanner tier={tier} tierExpiry={tierExpiry} isAdmin={isAdmin} />
-
-      {/* Stats Row */}
-      <div className="stats-row">
-        <div className="stat-card">
-          <div className="stat-value">{stats.totalAnswers}</div>
-          <div className="stat-label">Answers Saved</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">{stats.averageGrade > 0 ? `${stats.averageGrade}%` : '—'}</div>
-          <div className="stat-label">Avg. Grade</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">{stats.averageRating > 0 ? stats.averageRating.toFixed(1) : '—'}</div>
-          <div className="stat-label">Avg. Rating</div>
-        </div>
-        <div className="stat-card">
-          <div className="stat-value">{maxQ}</div>
-          <div className="stat-label">Questions Available</div>
-        </div>
-      </div>
-
-      {/* Tab Nav */}
-      <div className="tab-nav">
-        <button className={`tab-btn${tab === 'questions' ? ' active' : ''}`} onClick={() => setTab('questions')}>
-          Questions
-        </button>
-        <button className={`tab-btn${tab === 'saved' ? ' active' : ''}`} onClick={() => setTab('saved')}>
-          My Saved Answers ({answers.length})
-        </button>
-      </div>
-
-      {/* Questions Tab */}
-      {tab === 'questions' && (
-        <div className="dashboard-grid">
-          {/* Sidebar — Business Titles */}
-          <aside className="sidebar">
-            <h3>Topics</h3>
-            <button
-              className={`sidebar-item${!selectedTitle ? ' active' : ''}`}
-              onClick={() => { setSelectedTitle(''); setPage(1); }}
-            >
-              All Topics
-            </button>
-            {titles.map(t => (
-              <button
-                key={t}
-                className={`sidebar-item${selectedTitle === t ? ' active' : ''}`}
-                onClick={() => { setSelectedTitle(t); setPage(1); }}
-              >
-                {t}
-              </button>
-            ))}
-          </aside>
-
-          {/* Main Question Area */}
-          <div>
-            {feedback && (
-              <div className={`alert ${feedback.startsWith('✅') ? 'alert-success' : 'alert-danger'}`} style={{ marginBottom: '1rem' }}>
-                {feedback}
-              </div>
-            )}
-
-            {loadingQ ? (
-              <div className="spinner-wrap"><div className="spinner"></div></div>
-            ) : question ? (
-              <div className="question-card">
-                <div className="question-meta">
-                  <span className="question-number">Q{page} of {Math.min(totalQ, maxQ)}</span>
-                  <span className={`question-category ${question.category}`}>{question.category}</span>
-                  <span className={`badge badge-${question.tierAccess}`}>{question.tierAccess}</span>
-                </div>
-
-                <div className="question-title">{question.businessTitle}</div>
-                <p className="question-text">{question.questionText}</p>
-
-                {question.example && (
-                  <div className="question-example">
-                    <strong>Example Scenario</strong>
-                    {question.example}
-                  </div>
-                )}
-
-                {/* Answer Section */}
-                <div className="answer-section">
-                  <label htmlFor="answer-text">Your Answer</label>
-                  <textarea
-                    id="answer-text"
-                    className="form-control"
-                    rows={6}
-                    value={answerText}
-                    onChange={e => setAnswerText(e.target.value)}
-                    placeholder="Write your detailed answer here. Be as specific as possible — the more detail you include, the more accurately you can self-grade."
-                  />
-                </div>
-
-                <div className="question-actions">
-                  <button className="btn btn-primary" onClick={saveAnswer} disabled={saving || !answerText.trim()}>
-                    {saving ? 'Saving…' : 'Save Answer'}
-                  </button>
-
-                  <div className="grade-input-row">
-                    <label style={{ fontWeight: 600, fontSize: '0.85rem', whiteSpace: 'nowrap' }}>Self-Grade (0–100):</label>
-                    <input
-                      type="number"
-                      className="form-control"
-                      min="0" max="100"
-                      value={grade}
-                      onChange={e => setGrade(e.target.value)}
-                      placeholder="0–100"
-                    />
-                    <button className="btn btn-secondary btn-sm" onClick={saveGrade} disabled={saving || grade === ''}>
-                      Save Grade
-                    </button>
-                  </div>
-
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-                    <span style={{ fontSize: '0.85rem', fontWeight: 600, color: 'var(--color-text-light)' }}>Relevance:</span>
-                    <StarRating value={rating} onChange={saveRating} />
-                  </div>
-                </div>
-              </div>
-            ) : (
-              <div className="empty-state">
-                <div className="empty-icon">📭</div>
-                <h3>No questions available</h3>
-                <p>
-                  {tier === 'free'
-                    ? 'Your free trial access may have expired, or no questions match this filter.'
-                    : 'No questions found for this filter.'}
-                </p>
-                {tier === 'free' && <Link to="/price" className="btn btn-primary" style={{ marginTop: '1rem' }}>Upgrade Plan</Link>}
-              </div>
-            )}
-
-            {/* Pagination */}
-            {totalQ > 0 && !loadingQ && (
-              <div className="pagination">
-                <button
-                  className="pagination-btn"
-                  onClick={() => fetchQuestion(page - 1)}
-                  disabled={page <= 1}
-                  title="Previous"
-                >‹</button>
-
-                {Array.from({ length: Math.min(totalPages, maxQ) }, (_, i) => i + 1)
-                  .filter(p => p === 1 || p === Math.min(totalPages, maxQ) || Math.abs(p - page) <= 2)
-                  .map((p, i, arr) => (
-                    <React.Fragment key={p}>
-                      {i > 0 && arr[i - 1] !== p - 1 && <span className="pagination-info">…</span>}
-                      <button
-                        className={`pagination-btn${p === page ? ' active' : ''}`}
-                        onClick={() => fetchQuestion(p)}
-                      >{p}</button>
-                    </React.Fragment>
-                  ))}
-
-                <button
-                  className="pagination-btn"
-                  onClick={() => fetchQuestion(page + 1)}
-                  disabled={page >= Math.min(totalPages, maxQ)}
-                  title="Next"
-                >›</button>
-
-                <span className="pagination-info">
-                  {page} / {Math.min(totalPages, maxQ)}
-                </span>
-              </div>
-            )}
+      {saveTrace && (
+        <div className="question-page-summary" style={{ marginBottom: '1rem' }}>
+          <div style={{ display: 'grid', gap: '0.2rem' }}>
+            <div style={{ fontWeight: 700, color: 'var(--color-dark)' }}>
+              Save trace: {saveTrace.status}
+            </div>
+            <div style={{ color: 'var(--color-text-light)', fontSize: '0.9rem' }}>
+              Action: {saveTrace.source === 'next' ? 'Next Question' : saveTrace.source === 'previous' ? 'Previous Question' : 'Save Answer'}
+            </div>
+            <div style={{ color: 'var(--color-text-light)', fontSize: '0.9rem' }}>
+              Title: {saveTrace.title}
+            </div>
+            <div style={{ color: 'var(--color-text-light)', fontSize: '0.9rem' }}>
+              Question: {saveTrace.questionNumber}
+            </div>
+            <div style={{ color: 'var(--color-text-light)', fontSize: '0.9rem' }}>
+              Result: {saveTrace.message}
+            </div>
+            <div style={{ color: 'var(--color-text-light)', fontSize: '0.9rem' }}>
+              Time: {saveTrace.time}
+            </div>
           </div>
         </div>
       )}
 
-      {/* Saved Answers Tab */}
-      {tab === 'saved' && (
-        <div>
-          {answers.length === 0 ? (
-            <div className="empty-state">
-              <div className="empty-icon">📂</div>
-              <h3>No saved answers yet</h3>
-              <p>Go to the Questions tab, write your answers, and save them here.</p>
-            </div>
-          ) : (
-            <div>
-              {answers.map(ans => (
-                <div key={ans._id} className="card" style={{ marginBottom: '1.25rem' }}>
-                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: '1rem', flexWrap: 'wrap' }}>
-                    <div style={{ flex: 1 }}>
-                      <div style={{ fontWeight: 700, color: 'var(--color-dark)', marginBottom: '0.3rem' }}>
-                        {ans.questionId?.businessTitle || ans.businessTitle || 'Unknown'}
-                      </div>
-                      {ans.questionId?.questionText && (
-                        <p style={{ fontSize: '0.85rem', color: 'var(--color-text-light)', marginBottom: '0.6rem', lineHeight: 1.5 }}>
-                          {ans.questionId.questionText.substring(0, 180)}…
-                        </p>
-                      )}
-                      {ans.answerText && (
-                        <div style={{ background: 'var(--color-snow)', borderRadius: 'var(--radius-sm)', padding: '0.75rem', fontSize: '0.88rem', color: 'var(--color-text)', lineHeight: 1.6, marginBottom: '0.6rem' }}>
-                          {ans.answerText.substring(0, 300)}{ans.answerText.length > 300 ? '…' : ''}
-                        </div>
-                      )}
-                      <div style={{ display: 'flex', gap: '1.25rem', alignItems: 'center', flexWrap: 'wrap', fontSize: '0.85rem' }}>
-                        {ans.grade != null && (
-                          <span><strong>Grade:</strong> {ans.grade}/100</span>
-                        )}
-                        {ans.rating != null && (
-                          <span style={{ display: 'flex', alignItems: 'center', gap: '0.3rem' }}>
-                            <strong>Relevance:</strong>
-                            <StarRating value={ans.rating} readonly />
-                          </span>
-                        )}
-                        <span style={{ color: 'var(--color-muted)' }}>
-                          {new Date(ans.savedAt).toLocaleDateString()}
-                        </span>
-                      </div>
-                    </div>
-                    <button
-                      className="btn btn-danger btn-sm"
-                      onClick={() => deleteAnswer(ans._id)}
-                      title="Delete answer"
-                    >Delete</button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
+      <TierBanner tier={account?.tier || tier} tierExpiry={account?.tierExpiry || tierExpiry} isAdmin={isAdmin} />
+
+      <div className="tab-nav">
+        {hasAdvancedTools && <TitleButton onClick={() => navigate('/list')} />}
+        <DashboardButton
+          active={focus !== 'grade' && focus !== 'rate' && focus !== 'average'}
+          to={selectedTitle
+            ? `/title?${new URLSearchParams({ title: selectedTitle, tab: 'questions' }).toString()}`
+            : '/dashboard?tab=questions'}
+        />
+        {hasAdvancedTools && (
+          <GradeButton
+            active={focus === 'grade'}
+            to={selectedTitle
+              ? `/title?${new URLSearchParams({ title: selectedTitle, tab: 'questions', focus: 'grade' }).toString()}`
+              : '/dashboard?tab=questions&focus=grade'}
+          />
+        )}
+        {hasAdvancedTools && (
+          <RateButton
+            active={focus === 'rate'}
+            to={selectedTitle
+              ? `/title?${new URLSearchParams({ title: selectedTitle, tab: 'questions', focus: 'rate' }).toString()}`
+              : '/dashboard?tab=questions&focus=rate'}
+          />
+        )}
+        {hasAdvancedTools && (
+          <AverageButton
+            active={focus === 'average'}
+            to={selectedTitle
+              ? `/title?${new URLSearchParams({ title: selectedTitle, tab: 'questions', focus: 'average' }).toString()}`
+              : '/dashboard?focus=average'}
+          />
+        )}
+      </div>
+
+      {focus === 'grade' ? (
+        <GradePanel
+          answers={displayedAnswers}
+          divisor={selectedDivisor}
+          divisorOptions={divisorOptions}
+          onDivisorChange={setSelectedDivisor}
+          onGradeChange={saveGrade}
+          savingGradeId={savingGradeId}
+          gradeFeedback={gradeFeedback}
+          selectedTitle={selectedTitle}
+        />
+      ) : focus === 'rate' ? (
+        <RatePanel
+          answers={displayedAnswers}
+          onPrintAnswers={printAnswers}
+          onRateChange={saveRate}
+          rateFeedback={rateFeedback}
+          selectedTitle={selectedTitle}
+          activeTier={activeTier}
+        />
+      ) : focus === 'average' ? (
+        <AveragePanel
+          answers={displayedAnswers}
+          activeTier={activeTier}
+          selectedTitle={selectedTitle}
+          totalQuestions={totalQ}
+        />
+      ) : (
+        <Questions
+          activeTitle={activeTitle}
+          clientTitle={clientTitle}
+          questions={questions}
+          question={question}
+          selectedQuestionId={selectedQuestionId}
+          feedback={feedback}
+          loadingQ={loadingQ}
+          totalQ={totalQ}
+          totalPages={totalPages}
+          page={page}
+          maxQ={maxQ}
+          tier={tier}
+          answerText={answerText}
+          savingAnswer={savingAnswer}
+          canGoPrev={page > 1}
+          canGoNext={page < Math.min(totalPages, maxQ)}
+          onAnswerChange={setAnswerText}
+          onSaveAnswer={saveAnswer}
+          onPrevQuestion={() => goToAdjacentQuestion(-1)}
+          onNextQuestion={() => goToAdjacentQuestion(1)}
+          onSelectQuestion={selectQuestion}
+          onFetchPage={goToPage}
+          onBackToTitles={() => navigate('/list')}
+        />
       )}
     </div>
   );

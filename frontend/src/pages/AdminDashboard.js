@@ -1,11 +1,34 @@
 import React, { useState, useEffect } from 'react';
 import { useAuth } from '../context/AuthContext';
 
+function getPageRange(current, total) {
+  const pages = new Set([1, total, current, current - 1, current + 1]);
+  const sorted = [...pages].filter((n) => n >= 1 && n <= total).sort((a, b) => a - b);
+  const out = [];
+  let prev = 0;
+  for (const n of sorted) {
+    if (n - prev > 1) out.push('...');
+    out.push(n);
+    prev = n;
+  }
+  return out;
+}
+
 const API = (path, token, opts = {}) =>
   fetch(path, {
     ...opts,
     headers: { 'Authorization': `Bearer ${token}`, 'Content-Type': 'application/json', ...opts.headers }
   });
+
+const gradeLabel = (grade) => {
+  if (grade == null) return '—';
+  const numericGrade = Number(grade);
+  if (numericGrade >= 4) return 'A (4)';
+  if (numericGrade >= 3) return 'B (3)';
+  if (numericGrade >= 2) return 'C (2)';
+  if (numericGrade >= 1) return 'D (1)';
+  return 'F (0)';
+};
 
 export default function AdminDashboard() {
   const { user } = useAuth();
@@ -156,7 +179,7 @@ export default function AdminDashboard() {
 
       {/* Tab Nav */}
       <div className="tab-nav">
-        {['stats', 'users', 'questions', 'answers'].map(t => (
+        {['stats', 'users', 'questions'].map(t => (
           <button
             key={t}
             className={`tab-btn${tab === t ? ' active' : ''}`}
@@ -239,7 +262,7 @@ export default function AdminDashboard() {
                       <td><span className={`badge badge-${u.tier}`}>{u.tier}</span></td>
                       <td><span className={`badge badge-${u.role}`}>{u.role}</span></td>
                       <td style={{ fontSize: '0.82rem', color: 'var(--color-muted)' }}>{new Date(u.createdAt).toLocaleDateString()}</td>
-                      <td>{u.averageGrade > 0 ? `${u.averageGrade.toFixed(1)}%` : '—'}</td>
+                      <td>{u.averageGrade > 0 ? `${u.averageGrade.toFixed(2)} / 4.00` : '—'}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -315,24 +338,18 @@ export default function AdminDashboard() {
                   <thead>
                     <tr>
                       <th>#</th>
-                      <th>Title</th>
-                      <th>Category</th>
-                      <th>Tier</th>
-                      <th>Question (preview)</th>
+                      <th>Question</th>
                       <th>Actions</th>
                     </tr>
                   </thead>
                   <tbody>
                     {questions.length === 0 ? (
-                      <tr><td colSpan={6} style={{ textAlign: 'center', color: 'var(--color-muted)' }}>No questions found.</td></tr>
+                      <tr><td colSpan={3} style={{ textAlign: 'center', color: 'var(--color-muted)' }}>No questions found.</td></tr>
                     ) : questions.map(q => (
                       <tr key={q._id}>
-                        <td style={{ color: 'var(--color-muted)', fontSize: '0.82rem' }}>{q.questionNumber || '—'}</td>
-                        <td style={{ fontWeight: 600, fontSize: '0.88rem', maxWidth: '160px' }}>{q.businessTitle}</td>
-                        <td><span className={`question-category ${q.category}`}>{q.category}</span></td>
-                        <td><span className={`badge badge-${q.tierAccess}`}>{q.tierAccess}</span></td>
-                        <td style={{ fontSize: '0.82rem', color: 'var(--color-text-light)', maxWidth: '300px' }}>
-                          {q.questionText.substring(0, 100)}…
+                        <td style={{ color: 'var(--color-muted)', fontSize: '0.82rem', width: '50px' }}>{q.questionNumber || '—'}</td>
+                        <td style={{ fontSize: '0.9rem', color: 'var(--color-text)' }}>
+                          {q.questionText}
                         </td>
                         <td>
                           <div style={{ display: 'flex', gap: '0.4rem' }}>
@@ -349,11 +366,15 @@ export default function AdminDashboard() {
               {/* Question Pagination */}
               {qTotalPages > 1 && (
                 <div className="pagination">
-                  <button className="pagination-btn" onClick={() => fetchQuestions(qPage - 1)} disabled={qPage <= 1}>‹</button>
-                  {Array.from({ length: qTotalPages }, (_, i) => i + 1).map(p => (
-                    <button key={p} className={`pagination-btn${p === qPage ? ' active' : ''}`} onClick={() => fetchQuestions(p)}>{p}</button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => fetchQuestions(1)} disabled={qPage <= 1} aria-label="First page">|‹</button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => fetchQuestions(qPage - 1)} disabled={qPage <= 1}>‹ Prev</button>
+                  {getPageRange(qPage, qTotalPages).map((value, idx) => (
+                    value === '...'
+                      ? <span key={`qe${idx}`} className="pagination-info">…</span>
+                      : <button key={value} type="button" className={`pagination-btn${value === qPage ? ' active' : ''}`} onClick={() => fetchQuestions(value)}>{value}</button>
                   ))}
-                  <button className="pagination-btn" onClick={() => fetchQuestions(qPage + 1)} disabled={qPage >= qTotalPages}>›</button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => fetchQuestions(qPage + 1)} disabled={qPage >= qTotalPages}>Next ›</button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => fetchQuestions(qTotalPages)} disabled={qPage >= qTotalPages} aria-label="Last page">›|</button>
                 </div>
               )}
             </>
@@ -394,7 +415,7 @@ export default function AdminDashboard() {
                         <td style={{ fontSize: '0.82rem', color: 'var(--color-text-light)', maxWidth: '220px' }}>
                           {a.answerText ? a.answerText.substring(0, 80) + '…' : <em>No text</em>}
                         </td>
-                        <td>{a.grade != null ? `${a.grade}/100` : '—'}</td>
+                        <td>{gradeLabel(a.grade)}</td>
                         <td>{a.rating != null ? `${a.rating}★` : '—'}</td>
                         <td style={{ fontSize: '0.78rem', color: 'var(--color-muted)', whiteSpace: 'nowrap' }}>
                           {new Date(a.savedAt).toLocaleDateString()}
@@ -408,11 +429,15 @@ export default function AdminDashboard() {
               {/* Answers Pagination */}
               {aTotalPages > 1 && (
                 <div className="pagination">
-                  <button className="pagination-btn" onClick={() => fetchAnswers(aPage - 1)} disabled={aPage <= 1}>‹</button>
-                  {Array.from({ length: aTotalPages }, (_, i) => i + 1).map(p => (
-                    <button key={p} className={`pagination-btn${p === aPage ? ' active' : ''}`} onClick={() => fetchAnswers(p)}>{p}</button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => fetchAnswers(1)} disabled={aPage <= 1} aria-label="First page">|‹</button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => fetchAnswers(aPage - 1)} disabled={aPage <= 1}>‹ Prev</button>
+                  {getPageRange(aPage, aTotalPages).map((value, idx) => (
+                    value === '...'
+                      ? <span key={`ae${idx}`} className="pagination-info">…</span>
+                      : <button key={value} type="button" className={`pagination-btn${value === aPage ? ' active' : ''}`} onClick={() => fetchAnswers(value)}>{value}</button>
                   ))}
-                  <button className="pagination-btn" onClick={() => fetchAnswers(aPage + 1)} disabled={aPage >= aTotalPages}>›</button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => fetchAnswers(aPage + 1)} disabled={aPage >= aTotalPages}>Next ›</button>
+                  <button type="button" className="btn btn-secondary btn-sm" onClick={() => fetchAnswers(aTotalPages)} disabled={aPage >= aTotalPages} aria-label="Last page">›|</button>
                 </div>
               )}
             </>

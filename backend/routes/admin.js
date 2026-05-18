@@ -3,6 +3,7 @@ const router = express.Router();
 const User = require('../models/User');
 const Question = require('../models/Question');
 const Answer = require('../models/Answer');
+const Business = require('../models/Business');
 const { protect, adminOnly } = require('../middleware/auth');
 
 router.use(protect, adminOnly);
@@ -40,11 +41,21 @@ router.get('/questions', async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 20;
-    const total = await Question.countDocuments();
-    const questions = await Question.find()
-      .sort({ questionNumber: 1, createdAt: 1 })
-      .skip((page - 1) * limit)
-      .limit(limit);
+    // Group by questionNumber so each number appears once (the bank is duplicated per businessTitle).
+    const grouped = await Question.aggregate([
+      { $sort: { questionNumber: 1, createdAt: 1 } },
+      { $group: { _id: '$questionNumber', doc: { $first: '$$ROOT' } } },
+      { $replaceRoot: { newRoot: '$doc' } },
+      { $sort: { questionNumber: 1 } },
+      {
+        $facet: {
+          questions: [{ $skip: (page - 1) * limit }, { $limit: limit }],
+          totalCount: [{ $count: 'count' }],
+        },
+      },
+    ]);
+    const questions = grouped[0]?.questions || [];
+    const total = grouped[0]?.totalCount?.[0]?.count || 0;
     res.json({ questions, total, page, pages: Math.ceil(total / limit) });
   } catch (err) {
     res.status(500).json({ message: 'Server error' });
@@ -83,12 +94,47 @@ router.delete('/questions/:id', async (req, res) => {
   }
 });
 
+// DELETE /api/admin/titles/:title
+router.delete('/titles/:title', async (req, res) => {
+  try {
+    const businessTitle = decodeURIComponent(req.params.title || '').trim();
+    if (!businessTitle) {
+      return res.status(400).json({ message: 'Business title is required.' });
+    }
+
+    const [questionResult, businessResult] = await Promise.all([
+      Question.updateMany(
+        { businessTitle, isActive: true },
+        { $set: { isActive: false } }
+      ),
+      Business.updateMany(
+        { title: businessTitle, isActive: true },
+        { $set: { isActive: false } }
+      )
+    ]);
+
+    if (questionResult.matchedCount === 0 && businessResult.matchedCount === 0) {
+      return res.status(404).json({ message: 'Business title not found.' });
+    }
+
+    res.json({
+      message: 'Business title deleted.',
+      title: businessTitle,
+      deactivatedQuestions: questionResult.modifiedCount,
+      deactivatedBusinesses: businessResult.modifiedCount
+    });
+  } catch (err) {
+    res.status(500).json({ message: err.message });
+  }
+ });
+
 // GET /api/admin/stats
 router.get('/stats', async (req, res) => {
   try {
     const totalUsers = await User.countDocuments();
     const totalAnswers = await Answer.countDocuments();
-    const totalQuestions = await Question.countDocuments({ isActive: true });
+    const distinctNumbers = await Question.distinct('questionNumber', { isActive: true });
+    const totalQuestions = distinctNumbers.length;
     const freeUsers = await User.countDocuments({ tier: 'free' });
     const membersUsers = await User.countDocuments({ tier: 'members' });
     const proUsers = await User.countDocuments({ tier: 'pro' });
